@@ -528,16 +528,32 @@ mod atomic_tests {
                 code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
             };
             let p = ir::build(&native.code, false, native.vgprs).unwrap();
+            let st = structure::structure(&p).unwrap();
+            let io = io::raise(&p, &native).unwrap();
+            let res = resource::track(&p, &native.layout, native.stage).unwrap();
+            let parts = lower::Parts {
+                native: &native,
+                p: &p,
+                st: &st,
+                io: &io,
+                res: &res,
+                inputs: vec![],
+                outputs: vec![],
+                prims: vec![],
+                mesh_stride: 0,
+            };
+            lower::check_image_atomic_calls(
+                &parts,
+                if opcode == 16 {
+                    "atomicCompareExchange"
+                } else {
+                    "atomicBinOp"
+                },
+                if wide { 64 } else { 32 },
+            );
             let bytes = crate::dxbc::build(&[]);
-            let shader = emit(
-                &Container::parse(&bytes).unwrap(),
-                &native,
-                &p,
-                &structure::structure(&p).unwrap(),
-                &io::raise(&p, &native).unwrap(),
-                &resource::track(&p, &native.layout, native.stage).unwrap(),
-            )
-            .unwrap();
+            let container = Container::parse(&bytes).unwrap();
+            let shader = emit(&container, &native, &p, &st, &io, &res).unwrap();
             let container = Container::parse(&shader.dxil).unwrap();
             let features = u64::from_le_bytes(
                 container

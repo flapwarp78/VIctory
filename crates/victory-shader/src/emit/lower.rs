@@ -76,6 +76,14 @@ pub(crate) fn lower(parts: &Parts) -> Result<Lowered, ShaderError> {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn check_image_atomic_calls(parts: &Parts, first: &str, bits: u32) {
+    let bad = HashMap::new();
+    let mut lower = Lower::new(parts, &bad);
+    assert!(lower.build().is_ok(), "fixture did not lower");
+    lower.s.m.check_image_atomic_calls(first, bits);
+}
+
 const TWO_PI: f32 = std::f32::consts::TAU;
 /// `s_sendmsg` id of a mesh or NGG stage's output allocation request.
 const GS_ALLOC_REQ: u16 = 9;
@@ -797,6 +805,23 @@ impl<'a> Lower<'a> {
     }
 
     fn run(mut self) -> Result<Lowered, Stop> {
+        self.build()?;
+        let user_data = self.user_reads.values().copied().collect();
+        self.s.samplers = self.samplers.len() as u32;
+        let root_cbvs = self.s.root_cbvs.iter().map(|r| r.0).collect();
+        let root_srvs = self.s.root_srvs.iter().map(|r| r.0).collect();
+        let cmp_samplers = self.s.cmp_samplers;
+        Ok(Lowered {
+            cmp_samplers,
+            root_cbvs,
+            root_srvs,
+            dxil: self.s.finish(),
+            user_data,
+            samplers: self.samplers,
+        })
+    }
+
+    fn build(&mut self) -> Result<(), Stop> {
         let p = self.x.p;
         let order = crate::ir::reverse_postorder(&p.blocks);
         for (n, &b) in order.iter().enumerate() {
@@ -871,20 +896,7 @@ impl<'a> Lower<'a> {
             self.tail[b] = Some(self.cur);
             self.exit(b)?;
         }
-        self.fill_phis()?;
-        let user_data = self.user_reads.values().copied().collect();
-        self.s.samplers = self.samplers.len() as u32;
-        let root_cbvs = self.s.root_cbvs.iter().map(|r| r.0).collect();
-        let root_srvs = self.s.root_srvs.iter().map(|r| r.0).collect();
-        let cmp_samplers = self.s.cmp_samplers;
-        Ok(Lowered {
-            cmp_samplers,
-            root_cbvs,
-            root_srvs,
-            dxil: self.s.finish(),
-            user_data,
-            samplers: self.samplers,
-        })
+        self.fill_phis()
     }
 
     fn exported_out(&self, b: usize) -> bool {
@@ -5304,11 +5316,11 @@ impl<'a> Lower<'a> {
             };
             let width = if wide { 2 } else { 1 };
             let vals = self.vgprs(inst, data, if compare { 2 * width } else { width })?;
-            let (ty, component) = if wide {
+            let ty = if wide {
                 self.s.flags |= flags::INT64 | flags::ATOMIC_TYPED64 | flags::ATOMIC_HEAP64;
-                (self.s.m.int(64), 0x107) // one uint64_t in an R32G32_UINT view
+                self.s.m.int(64)
             } else {
-                (self.s.t.i32, 0x105)
+                self.s.t.i32
             };
             let original = if wide {
                 self.join64(vals[0], vals[1])
@@ -5321,7 +5333,9 @@ impl<'a> Lower<'a> {
             } else {
                 original
             };
-            let h = self.handle(site, src, false, (kind | 0x1000, component))?;
+            // DXC annotates both widths as scalar U32. The i64 overload
+            // still requires the host to bind an R32G32_UINT UAV.
+            let h = self.handle(site, src, false, (kind | 0x1000, 0x105))?;
             let mut args = vec![h];
             let (intrinsic, opcode) = if compare {
                 let comparand = if wide {

@@ -208,6 +208,52 @@ pub(crate) struct Module {
 }
 
 impl Module {
+    #[cfg(test)]
+    pub(super) fn check_image_atomic_calls(&self, first: &str, bits: u32) {
+        let atomics: Vec<_> = self
+            .insts
+            .iter()
+            .filter_map(|inst| match &inst.op {
+                Op::Call(f, args) if self.funcs[*f as usize].name.starts_with("dx.op.atomic") => {
+                    Some((self.funcs[*f as usize].name.as_str(), args, inst.ty))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(atomics.len(), 2);
+        for ((name, args, result), expected) in atomics.into_iter().zip([first, "atomicBinOp"]) {
+            assert_eq!(name, format!("dx.op.{expected}.i{bits}"));
+            assert_eq!(self.types[result.0 as usize], TypeDef::Int(bits));
+            let values = if expected == "atomicCompareExchange" {
+                2
+            } else {
+                1
+            };
+            for &arg in &args[args.len() - values..] {
+                assert_eq!(self.types[self.type_of(arg).0 as usize], TypeDef::Int(bits));
+            }
+
+            let V::Inst(handle) = args[1] else {
+                panic!("expected an annotated handle");
+            };
+            let Op::Call(f, annotation) = &self.insts[handle as usize].op else {
+                panic!("expected an annotation call");
+            };
+            assert_eq!(self.funcs[*f as usize].name, "dx.op.annotateHandle");
+
+            let V::Const(properties) = annotation[2] else {
+                panic!("expected constant UAV properties");
+            };
+            let Const::Aggregate(fields) = &self.consts[properties as usize].1 else {
+                panic!("expected a UAV property pair");
+            };
+            assert_eq!(fields.len(), 2);
+            // DXC uses scalar U32 for both widths of RWTexture2D atomics.
+            assert_eq!(self.consts[fields[0] as usize].1, Const::Int(0x1002));
+            assert_eq!(self.consts[fields[1] as usize].1, Const::Int(0x105));
+        }
+    }
+
     fn ty(&mut self, def: TypeDef) -> Ty {
         if let Some(&t) = self.type_ids.get(&def) {
             return Ty(t);
