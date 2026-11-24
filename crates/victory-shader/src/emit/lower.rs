@@ -6556,7 +6556,75 @@ impl<'a> Lower<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Numeric, buffer_format};
+    use super::{Lower, Numeric, Parts, buffer_format};
+    use crate::native::{ComputeIo, HwStage, NativeProgram, RootParam, RootType, StageIo};
+    use crate::resource::Source;
+    use crate::{io, ir, resource, structure};
+    use std::collections::HashMap;
+
+    const S_ENDPGM: u32 = 0xBF81_0000;
+
+    #[test]
+    fn heap_handles_are_cached_by_element_type() {
+        // Only load a descriptor. Exercise handle interning directly, without
+        // emitting a shader container or invoking a graphics backend.
+        let words = [
+            0xBE81_0380, // s_mov_b32 s1, 0
+            0xF40C_0100,
+            0xFA00_0000, // s_load_dwordx8 s[4:11], s[0:1], null
+            S_ENDPGM,
+        ];
+        let native = NativeProgram {
+            stage: HwStage::Cs,
+            wave64: false,
+            vgprs: 8,
+            layout: vec![RootParam {
+                root: RootType::Table,
+                table_offset_dwords: 0,
+                sgprs: 1,
+                base_register: 0,
+                user_data: 0,
+                slot: 0,
+            }],
+            used: vec![],
+            io: StageIo::Cs(ComputeIo {
+                rsrc2: 1 << 1,
+                threads: [32, 1, 1],
+            }),
+            code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        };
+        let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
+        let res = resource::track(&p, &native.layout, native.stage).unwrap();
+        let io = io::raise(&p, &native).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let parts = Parts {
+            native: &native,
+            p: &p,
+            st: &st,
+            io: &io,
+            res: &res,
+            inputs: vec![],
+            outputs: vec![],
+            prims: vec![],
+            mesh_stride: 0,
+        };
+        let bad = HashMap::new();
+        let mut emitter = Lower::new(&parts, &bad);
+        emitter.cur = emitter.s.m.new_block();
+        let load = res.scalar[0].0;
+        let src = Source::Loaded { load, first: 0 };
+        let float = (0x1002, 0x109);
+        let uint = (0x1002, 0x105);
+        let float_handle = emitter.handle(load, &src, false, float).unwrap();
+        let uint_handle = emitter.handle(load, &src, false, uint).unwrap();
+        assert_ne!(float_handle, uint_handle);
+        assert_eq!(
+            emitter.handle(load, &src, false, float).unwrap(),
+            float_handle
+        );
+        assert_eq!(emitter.handle(load, &src, false, uint).unwrap(), uint_handle);
+    }
+
 
     #[test]
     fn buffer_formats_by_number() {
